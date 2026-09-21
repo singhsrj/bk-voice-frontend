@@ -54,6 +54,17 @@ function parseReceipt(raw: Record<string, any>): ReceiptData {
   };
 }
 
+// Thrown when /api/token refuses. userMessage is the server's plain-language
+// reason (signed out, daily limit reached, ...) and is shown to the customer.
+class TokenError extends Error {
+  constructor(
+    readonly status: number,
+    readonly userMessage?: string,
+  ) {
+    super(`token route returned ${status}`);
+  }
+}
+
 function removeAgentAudio() {
   document
     .querySelectorAll("audio[data-bk-agent]")
@@ -149,7 +160,13 @@ export function useVoiceOrder() {
     let step: "token" | "connect" | "mic" = "token";
     try {
       const res = await fetch("/api/token", { method: "POST" });
-      if (!res.ok) throw new Error(`token route returned ${res.status}`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new TokenError(
+          res.status,
+          typeof body?.message === "string" ? body.message : undefined,
+        );
+      }
       const { serverUrl, token } = await res.json();
 
       step = "connect";
@@ -169,7 +186,9 @@ export function useVoiceOrder() {
       roomRef.current = null;
       setPhase("idle");
       setError(
-        step === "token"
+        e instanceof TokenError && e.userMessage
+          ? e.userMessage
+          : step === "token"
           ? "Couldn't start the call. Check that LIVEKIT_URL, LIVEKIT_API_KEY and LIVEKIT_API_SECRET are set for the token route."
           : step === "mic"
             ? "Microphone blocked. Allow microphone access in your browser, then try again."

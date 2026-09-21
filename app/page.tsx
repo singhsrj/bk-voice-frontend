@@ -1,5 +1,6 @@
 "use client";
 
+import { SignInButton, UserButton, useAuth } from "@clerk/nextjs";
 import { Receipt } from "@/components/Receipt";
 import {
   useVoiceOrder,
@@ -13,6 +14,7 @@ function getStatus(
   phase: Phase,
   agent: AgentState,
   hasReceipt: boolean,
+  signedIn: boolean,
 ): { label: string; tone: Tone } {
   if (phase === "connecting") return { label: "Connecting…", tone: "busy" };
   if (phase === "live") {
@@ -26,18 +28,25 @@ function getStatus(
       ? { label: "Order placed", tone: "idle" }
       : { label: "Call ended", tone: "idle" };
   }
-  return { label: "Ready when you are", tone: "idle" };
+  return {
+    label: signedIn ? "Ready when you are" : "Sign in to place an order",
+    tone: "idle",
+  };
 }
 
 export default function Page() {
+  const { isLoaded, isSignedIn } = useAuth();
   const { phase, agentState, lines, receipt, muted, error, start, end, toggleMute } =
     useVoiceOrder();
-  const status = getStatus(phase, agentState, Boolean(receipt));
+  const status = getStatus(phase, agentState, Boolean(receipt), Boolean(isSignedIn));
 
   return (
     <main className="shell">
       <section className="board">
-        <p className="board__name">Drive-thru voice order</p>
+        <div className="board__top">
+          <p className="board__name">Drive-thru voice order</p>
+          {isSignedIn && <UserButton />}
+        </div>
 
         <div className="board__main">
           <h1>Tell us what you&apos;d like.</h1>
@@ -47,7 +56,17 @@ export default function Page() {
           </p>
 
           <div className="controls">
-            {phase === "live" ? (
+            {!isLoaded ? (
+              <button type="button" className="btn btn--primary" disabled>
+                Loading…
+              </button>
+            ) : !isSignedIn ? (
+              <SignInButton mode="modal">
+                <button type="button" className="btn btn--primary">
+                  Sign in
+                </button>
+              </SignInButton>
+            ) : phase === "live" ? (
               <>
                 <button
                   type="button"

@@ -55,6 +55,14 @@ button {
   font-weight: 600;
 }
 
+.board__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  min-height: 2rem;
+}
+
 .board__main {
   display: flex;
   flex-direction: column;

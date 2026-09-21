@@ -8,7 +8,10 @@
     "start": "next start"
   },
   "dependencies": {
+    "@clerk/nextjs": "^7.9.4",
     "@livekit/protocol": "^1.39.0",
+    "@upstash/ratelimit": "^2.1.0",
+    "@upstash/redis": "^1.39.0",
     "livekit-client": "^2.15.0",
     "livekit-server-sdk": "^2.13.0",
     "next": "^15.5.0",
