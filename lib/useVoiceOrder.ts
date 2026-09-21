@@ -65,6 +65,16 @@ class TokenError extends Error {
   }
 }
 
+// The LLM sometimes writes markdown (**bold**, "- " bullets) even though the
+// prompt says not to. Speech filters it out, but captions show raw text.
+function cleanCaption(text: string): string {
+  return text
+    .replace(/[*`#]/g, "")
+    .replace(/^\s*[-•]\s+/gm, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function removeAgentAudio() {
   document
     .querySelectorAll("audio[data-bk-agent]")
@@ -93,8 +103,9 @@ export function useVoiceOrder() {
     const room = new Room();
     roomRef.current = room;
 
-    const upsertLine = (id: string, who: Line["who"], text: string) => {
-      if (!text.trim()) return;
+    const upsertLine = (id: string, who: Line["who"], rawText: string) => {
+      const text = cleanCaption(rawText);
+      if (!text) return;
       setLines((prev) => {
         const i = prev.findIndex((l) => l.id === id);
         const next =
@@ -146,10 +157,24 @@ export function useVoiceOrder() {
     room.registerTextStreamHandler(TRANSCRIPTION_TOPIC, async (reader) => {
       const attrs = reader.info.attributes ?? {};
       const id = attrs["lk.segment_id"] ?? reader.info.id;
-      // Only captions of the customer's speech carry a transcribed track id.
-      const who: Line["who"] = attrs["lk.transcribed_track_id"]
-        ? "you"
-        : "assistant";
+
+      // The agent publishes captions for BOTH sides, and each caption is
+      // tagged with the audio track it transcribes. Customer captions carry
+      // the id of the customer's own microphone track; everything else
+      // (the assistant's speech) carries the assistant's track id.
+      const micTrackId = room.localParticipant.getTrackPublication(
+        Track.Source.Microphone,
+      )?.trackSid;
+      const transcribedTrackId = attrs["lk.transcribed_track_id"];
+      const who: Line["who"] =
+        transcribedTrackId && transcribedTrackId === micTrackId
+          ? "you"
+          : "assistant";
+
+      if (process.env.NODE_ENV !== "production") {
+        console.debug("[caption]", who, { transcribedTrackId, micTrackId });
+      }
+
       let text = "";
       for await (const chunk of reader) {
         text += chunk;

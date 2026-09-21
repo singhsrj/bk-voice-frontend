@@ -147,6 +147,33 @@ button {
   animation: pulse 1.4s ease-in-out infinite;
 }
 
+.board__note {
+  margin: 0;
+  font-size: 0.95rem;
+  opacity: 0.9;
+}
+
+.hints__label {
+  margin: 0 0 0.35rem;
+  font-weight: 700;
+}
+
+.hints ul {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  line-height: 1.4;
+}
+
+.disclaimer {
+  margin: auto 0 0;
+  font-size: 0.875rem;
+  opacity: 0.85;
+}
+
 .error {
   max-width: 42ch;
   margin: 0;

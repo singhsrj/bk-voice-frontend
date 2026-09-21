@@ -2,10 +2,20 @@ import { Ratelimit } from "@upstash/ratelimit";
 import { Redis } from "@upstash/redis";
 
 // Each call to /api/token starts one voice session, and every session spends
-// STT, LLM and TTS credits. These two caps bound how many sessions can start.
-//   SESSIONS_PER_USER_PER_DAY     per signed-in user (default 5)
-//   SESSIONS_PER_DAY_ALL_USERS    across everyone     (default 50)
-// Both reset at 00:00 UTC.
+// STT, LLM and TTS credits. These caps bound how many sessions can start.
+// All of them reset at 00:00 UTC.
+//
+// Signed-in users
+//   SESSIONS_PER_USER_PER_DAY            per user               (default 5)
+// Guests
+//   GUEST_SESSIONS_PER_DAY               per guest cookie       (default 2)
+//   GUEST_SESSIONS_PER_IP_PER_DAY        per network address    (default 5)
+//   GUEST_SESSIONS_PER_DAY_ALL_GUESTS    all guests together    (default 20)
+// Everyone
+//   SESSIONS_PER_DAY_ALL_USERS           guests + users         (default 50)
+//
+// A guest cookie is easy to clear, so it only stops casual repeat use. The
+// per-IP and all-guests caps are what actually protect your credits.
 
 function intFromEnv(name: string, fallback: number): number {
   const n = parseInt(process.env[name] ?? "", 10);
@@ -14,6 +24,12 @@ function intFromEnv(name: string, fallback: number): number {
 
 const USER_LIMIT = intFromEnv("SESSIONS_PER_USER_PER_DAY", 5);
 const GLOBAL_LIMIT = intFromEnv("SESSIONS_PER_DAY_ALL_USERS", 50);
+const GUEST_LIMIT = intFromEnv("GUEST_SESSIONS_PER_DAY", 2);
+const IP_LIMIT = intFromEnv("GUEST_SESSIONS_PER_IP_PER_DAY", 5);
+const GUEST_GLOBAL_LIMIT = intFromEnv("GUEST_SESSIONS_PER_DAY_ALL_GUESTS", 20);
+
+// Set GUESTS_ENABLED=false to switch guest ordering off (sign-in only).
+export const GUESTS_ENABLED = process.env.GUESTS_ENABLED !== "false";
 
 // Clerk user ids (user_...) that skip the limits, e.g. yours while testing.
 const EXEMPT = new Set(
@@ -52,14 +68,6 @@ function memoryLimiter(max: number, prefix: string): Limiter {
   };
 }
 
-function upstashLimiter(max: number, prefix: string): Limiter {
-  return new Ratelimit({
-    redis: Redis.fromEnv(),
-    limiter: Ratelimit.fixedWindow(max, "1 d"),
-    prefix,
-  });
-}
-
 const hasUpstash = Boolean(
   process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN,
 );
@@ -72,12 +80,20 @@ if (!hasUpstash) {
   );
 }
 
-const userLimiter = hasUpstash
-  ? upstashLimiter(USER_LIMIT, "bk:user")
-  : memoryLimiter(USER_LIMIT, "user");
-const globalLimiter = hasUpstash
-  ? upstashLimiter(GLOBAL_LIMIT, "bk:global")
-  : memoryLimiter(GLOBAL_LIMIT, "global");
+function makeLimiter(max: number, name: string): Limiter {
+  if (!hasUpstash) return memoryLimiter(max, name);
+  return new Ratelimit({
+    redis: Redis.fromEnv(),
+    limiter: Ratelimit.fixedWindow(max, "1 d"),
+    prefix: `bk:${name}`,
+  });
+}
+
+const userLimiter = makeLimiter(USER_LIMIT, "user");
+const guestLimiter = makeLimiter(GUEST_LIMIT, "guest");
+const ipLimiter = makeLimiter(IP_LIMIT, "ip");
+const guestGlobalLimiter = makeLimiter(GUEST_GLOBAL_LIMIT, "guests-all");
+const globalLimiter = makeLimiter(GLOBAL_LIMIT, "global");
 
 function waitText(resetMs: number): string {
   const minutes = Math.max(1, Math.ceil((resetMs - Date.now()) / 60_000));
@@ -86,29 +102,63 @@ function waitText(resetMs: number): string {
   return `about ${hours} hour${hours === 1 ? "" : "s"}`;
 }
 
+export type Requester =
+  | { kind: "user"; userId: string }
+  | { kind: "guest"; guestId: string; ip: string };
+
 export type QuotaResult =
   | { ok: true }
-  | { ok: false; code: "user_limit" | "global_limit"; message: string };
+  | { ok: false; code: string; message: string };
 
-export async function checkOrderQuota(userId: string): Promise<QuotaResult> {
-  if (EXEMPT.has(userId)) return { ok: true };
+const deny = (code: string, message: string): QuotaResult => ({
+  ok: false,
+  code,
+  message,
+});
 
-  const user = await userLimiter.limit(userId);
-  if (!user.success) {
-    return {
-      ok: false,
-      code: "user_limit",
-      message: `You've used all ${USER_LIMIT} orders for today. Try again in ${waitText(user.reset)}.`,
-    };
+export async function checkOrderQuota(who: Requester): Promise<QuotaResult> {
+  if (who.kind === "user") {
+    if (EXEMPT.has(who.userId)) return { ok: true };
+
+    const user = await userLimiter.limit(who.userId);
+    if (!user.success) {
+      return deny(
+        "user_limit",
+        `You've used all ${USER_LIMIT} orders for today. Try again in ${waitText(user.reset)}.`,
+      );
+    }
+  } else {
+    const guest = await guestLimiter.limit(who.guestId);
+    if (!guest.success) {
+      return deny(
+        "guest_limit",
+        `You've used your ${GUEST_LIMIT} guest order${GUEST_LIMIT === 1 ? "" : "s"} for today. Sign in to get more, or try again in ${waitText(guest.reset)}.`,
+      );
+    }
+
+    const ip = await ipLimiter.limit(who.ip);
+    if (!ip.success) {
+      return deny(
+        "ip_limit",
+        `There have been too many guest orders from this network today. Sign in to continue, or try again in ${waitText(ip.reset)}.`,
+      );
+    }
+
+    const allGuests = await guestGlobalLimiter.limit("all");
+    if (!allGuests.success) {
+      return deny(
+        "guest_capacity",
+        `Guest ordering has reached its daily limit. Sign in to continue, or try again in ${waitText(allGuests.reset)}.`,
+      );
+    }
   }
 
   const everyone = await globalLimiter.limit("all");
   if (!everyone.success) {
-    return {
-      ok: false,
-      code: "global_limit",
-      message: `The ordering assistant has reached its daily limit. Try again in ${waitText(everyone.reset)}.`,
-    };
+    return deny(
+      "global_limit",
+      `The ordering assistant has reached its daily limit. Try again in ${waitText(everyone.reset)}.`,
+    );
   }
 
   return { ok: true };
